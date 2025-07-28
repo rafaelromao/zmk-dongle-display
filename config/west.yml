@@ -3,7 +3,7 @@ manifest:
     - name: zmkfirmware
       url-base: https://github.com/zmkfirmware
     - name: englmaxi
-      url-base: https://github.com/englmaxi
+      url-base: https://github.com/rafaelromao
   projects:
     - name: zmk
       remote: zmkfirmware
@@ -11,6 +11,6 @@ manifest:
       import: app/west.yml
     - name: zmk-config
       remote: englmaxi
-      revision: master
+      revision: main
   self:
     path: config
