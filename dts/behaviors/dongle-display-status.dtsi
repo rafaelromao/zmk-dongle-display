@@ -1,0 +1,10 @@
+/* SPDX-License-Identifier: MIT */
+/ {
+    behaviors {
+        /* ZMK split behavior names must be at most eight characters. */
+        dd_status: ddstat {
+            compatible = "zmk,behavior-dongle-display-status";
+            #binding-cells = <2>;
+        };
+    };
+};

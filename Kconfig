@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: MIT
+
+config ZMK_DONGLE_DISPLAY_STATUS
+    bool "Battery and connectivity status model"
+    default y if SHIELD_DONGLE_DISPLAY || SHIELD_DONGLE_DISPLAY_RELAY
+
+if ZMK_DONGLE_DISPLAY_STATUS
+
+config ZMK_DONGLE_DISPLAY_STATUS_SCREEN
+    bool "Compact battery and connectivity screen (128x32 or 128x64)"
+    default y if SHIELD_DONGLE_DISPLAY
+    help
+        Disable to use the original central-only animated screen instead.
+
+config ZMK_DONGLE_DISPLAY_MAX_PERIPHERALS
+    int "Maximum number of peripherals displayed/relayed"
+    range 1 14
+    default 2
+    help
+        Set this to at least the central's peripheral count on both the central
+        and display peripheral. Extra rows are paginated on small displays.
+
+config ZMK_DONGLE_DISPLAY_STATUS_SYNC
+    bool "Relay status over the existing encrypted split connection"
+    depends on ZMK_SPLIT_BLE
+    default y if SHIELD_DONGLE_DISPLAY_RELAY
+    default y if SHIELD_DONGLE_DISPLAY && !ZMK_SPLIT_ROLE_CENTRAL
+    help
+        Enable on the central and every peripheral carrying a status screen.
+        The relay shield enables this without a display, LVGL, or battery.
+
+config ZMK_DONGLE_DISPLAY_STATUS_REFRESH_SECONDS
+    int "Status relay heartbeat interval"
+    range 5 300
+    default 30
+    help
+        Changes are coalesced and sent promptly; unchanged state is only resent
+        at this interval, to recover from lost writes or discovery at startup.
+        Use the same value on the central and display peripherals.
+
+config ZMK_DONGLE_DISPLAY_STATUS_RECEIVERS
+    hex "Bit mask of split source IDs with a status display"
+    default 0x1
+    help
+        Central only: bit 0 targets the first paired peripheral, bit 1 the
+        second, etc. Pair the display half first, or adjust this mask. Status
+        is collected for ALL peripherals regardless of this mask.
+
+endif

@@ -1,0 +1,2 @@
+config SHIELD_DONGLE_DISPLAY_RELAY
+    def_bool $(shields_list_contains,dongle_display_relay)

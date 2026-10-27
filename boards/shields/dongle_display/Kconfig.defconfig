@@ -15,12 +15,17 @@ config ZMK_DISPLAY_STATUS_SCREEN_CUSTOM
     select LV_USE_ANIMATION
     select LV_USE_LINE 
     select LV_FONT_UNSCII_8
-    select ZMK_WPM
-    imply ZMK_HID_INDICATORS
+    select ZMK_WPM if !ZMK_DONGLE_DISPLAY_STATUS_SCREEN
+    imply ZMK_HID_INDICATORS if !ZMK_DONGLE_DISPLAY_STATUS_SCREEN
+
+config ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING
+    default y if ZMK_SPLIT_ROLE_CENTRAL
 
 config ZMK_DONGLE_DISPLAY_DONGLE_BATTERY
     bool "Show also the battery level of the dongle"
-    depends on BT && (!ZMK_SPLIT_BLE || ZMK_SPLIT_ROLE_CENTRAL)
+    help
+        Enable only when the central really has a battery. Leave disabled on
+        USB-powered dongles; peripherals receive this information from it.
 
 config ZMK_DONGLE_DISPLAY_MAC_MODIFIERS
     bool "Use MacOS modifier symbols instead of the Windows symbols"

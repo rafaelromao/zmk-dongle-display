@@ -1,0 +1,2 @@
+/* No display or battery hardware is added to the central. */
+#include <behaviors/dongle-display-status.dtsi>

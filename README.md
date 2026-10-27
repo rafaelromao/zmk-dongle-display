@@ -1,6 +1,105 @@
 # Dongle Display
 
-This module repository provides a ZMK shield that replaces the built-in status screen with a custom screen designed for 128x64-pixel OLED displays, or 128x32 with some limitations.
+This fork provides central **and peripheral** status screens for 128x32 and
+128x64 OLEDs. A peripheral screen can show the central's USB/Bluetooth host
+status and the battery/connection status of every half, even when the central
+is a USB-powered dongle with no display or battery.
+
+## Compact status screen
+
+The default screen uses eight-pixel rows, without animation or WPM collection:
+
+```text
+>USB+  BT1-
+C+ USB
+P1+ 75%
+P2+ 90%
+```
+
+`>` marks the selected (or preferred, while disconnected) output. `+` means
+connected/USB HID ready, `-` disconnected, and `BTn?` an unbonded host profile.
+`C` is the central; `P1`, `P2`, etc. are ZMK split source IDs in **pairing
+order**, not fixed left/right labels. `?` is an unknown battery reading; `0%`
+is a valid empty battery, not a disconnect. A battery-less central shows `USB`
+when powered, never an invented percentage. USB after a battery percentage
+indicates local USB power, not a charger IC's charging/charge-complete state.
+ZMK's standard remote battery service does not expose remote charging state.
+
+Both resolutions show the central and two peripherals at once. More peripherals
+are paginated every five seconds; set `CONFIG_ZMK_DONGLE_DISPLAY_MAX_PERIPHERALS`
+to the same value (up to 14) on central and display halves. The screen reads its
+dimensions from `zephyr,display`; no resolution-specific firmware edits are
+needed beyond the existing display devicetree. Existing central-only animated
+widgets remain available with `CONFIG_ZMK_DONGLE_DISPLAY_STATUS_SCREEN=n`.
+
+## Screen on a peripheral, headless central
+
+Add the module to **both** builds. Use these extra shields:
+
+```yaml
+include:
+  - board: nice_nano//zmk
+    shield: my_keyboard_central_dongle dongle_display_relay
+  - board: nice_nano//zmk
+    shield: my_keyboard_peripheral_left dongle_display
+  - board: nice_nano//zmk
+    shield: my_keyboard_peripheral_right
+```
+
+The normal keyboard shields still define the matrix, split roles and display
+hardware. The relay shield adds **no** display, LVGL, I2C, battery hardware or
+new Bluetooth connection. It carries status in an internal behavior over ZMK's
+existing encrypted central-to-peripheral split connection. No ZMK patch is
+required. This implementation targets the post-transport-refactor ZMK version
+used by `rafaelromao/keyboards` (`9ebbeff0a8b69a42f14aec022cdf16c7a107b9e0`,
+Zephyr 4.1 / LVGL 9); it does not claim compatibility with ZMK v0.3.
+
+Central configuration (for a USB-only, battery-less receiver):
+
+```ini
+CONFIG_ZMK_SPLIT_BLE_CENTRAL_PERIPHERALS=2
+CONFIG_ZMK_BATTERY=n
+CONFIG_ZMK_BATTERY_REPORTING=n
+CONFIG_BT_BAS=n
+CONFIG_ZMK_DISPLAY=n
+CONFIG_ZMK_DONGLE_DISPLAY_STATUS_SYNC=y
+CONFIG_ZMK_DONGLE_DISPLAY_STATUS_RECEIVERS=0x1
+```
+
+`STATUS_RECEIVERS` is a bit mask of split source IDs with screens: `0x1` for
+the first paired half, `0x2` for the second, `0x3` for both. Pair the display
+half first or change the mask; other halves need no display module. The central
+collects connectivity and battery status for **all** halves, not just receivers.
+The relay shield enables remote battery fetching. This module supplies ZMK's
+battery event definitions when local reporting is disabled, without starting
+local battery sampling. For a battery-powered central, keep normal battery
+reporting and enable `CONFIG_ZMK_DONGLE_DISPLAY_DONGLE_BATTERY=y` instead.
+
+Display peripheral configuration:
+
+```ini
+CONFIG_ZMK_DISPLAY=y
+CONFIG_ZMK_BATTERY_REPORTING=y
+CONFIG_ZMK_DONGLE_DISPLAY_STATUS_SYNC=y
+CONFIG_LV_Z_VDB_SIZE=32
+```
+
+Changes are coalesced within one second. A complete heartbeat every 30 seconds
+recovers from dropped writes and split discovery not having finished at initial
+connection. `CONFIG_ZMK_DONGLE_DISPLAY_STATUS_REFRESH_SECONDS` changes this
+interval (use the same setting on both devices). There is no periodic radio
+traffic from display rendering or pagination. Once ZMK reports a split
+disconnect (after BLE supervision detects it), the screen updates within one
+second; missing status expires after two heartbeat intervals. Local
+battery remains available while disconnected. Normal display blanking and
+peripheral deep sleep are preserved; status updates do not count as key activity.
+
+## Tests
+
+Run `bash tests/run.sh` with a host C compiler. It checks the actual packet
+encoder/decoder and status formatting with ASan/UBSan, including all supported
+source IDs, zero/unknown batteries, battery-less central, malformed packets and
+reconnection. Firmware/physical BLE and OLED tests are separate.
 
 ## Usage
 
@@ -11,16 +110,16 @@ manifest:
   remotes:
     - name: zmkfirmware
       url-base: https://github.com/zmkfirmware
-    - name: englmaxi
-      url-base: https://github.com/englmaxi
+    - name: rafaelromao
+      url-base: https://github.com/rafaelromao
   projects:
     - name: zmk
       remote: zmkfirmware
       revision: main
       import: app/west.yml
     - name: zmk-dongle-display
-      remote: englmaxi
-      revision: main # use 'v0.3' instead of 'main' if you use have pinned zmk to 'v0.3' or below
+      remote: rafaelromao
+      revision: main # publish the fork's changes before using a remote build
   self:
     path: config
 ```
@@ -41,6 +140,9 @@ For setup examples, refer to the shields in my [`zmk-config`](https://github.com
 - If you are using the smaller 0.91" OLED, replace `height = <64>;` by `height = <32>;`
 
 ## Widgets
+
+The following widgets describe the optional legacy screen
+(`CONFIG_ZMK_DONGLE_DISPLAY_STATUS_SCREEN=n`), supported on centrals only:
 - active hid indicators (CLCK, NLCK, SLCK)
 - active modifiers
 - bongo cat
@@ -101,7 +203,8 @@ CONFIG_ZMK_DONGLE_DISPLAY_WPM_DISABLED_LAYERS="layers" # comma separated
 
 ## Smaller OLEDs, with 128x32 pixels
 
-To allow smaller OLEDs, with 128x32 pixels, it will be necessary to exclude some widgets, like the bongo cat, active modifiers or the highest layer name. You can do it with the following config entries:
+The compact status screen already fits 128x32 without hiding status information.
+For the optional legacy screen, exclude widgets that do not fit:
 
 ```ini
 CONFIG_ZMK_DONGLE_DISPLAY_BONGO_CAT=n
