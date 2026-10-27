@@ -14,6 +14,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/event_manager.h>
 #include <zmk/events/wpm_state_changed.h>
 #include <zmk/wpm.h>
+#include <dongle_display/status.h>
 
 #include "bongo_cat.h"
 
@@ -127,9 +128,7 @@ static void set_animation(lv_obj_t *animing, struct bongo_cat_wpm_status_state s
 }
 
 struct bongo_cat_wpm_status_state bongo_cat_wpm_status_get_state(const zmk_event_t *eh) {
-    struct zmk_wpm_state_changed *ev = as_zmk_wpm_state_changed(eh);
-    // Add NULL check to prevent crash if event is NULL
-    return (struct bongo_cat_wpm_status_state) { .wpm = ev ? ev->state : 0 };
+    return (struct bongo_cat_wpm_status_state) { .wpm = dd_status_get().widgets.wpm };
 };
 
 void bongo_cat_wpm_status_update_cb(struct bongo_cat_wpm_status_state state) {
@@ -140,7 +139,7 @@ void bongo_cat_wpm_status_update_cb(struct bongo_cat_wpm_status_state state) {
 ZMK_DISPLAY_WIDGET_LISTENER(widget_bongo_cat, struct bongo_cat_wpm_status_state,
                             bongo_cat_wpm_status_update_cb, bongo_cat_wpm_status_get_state)
 
-ZMK_SUBSCRIPTION(widget_bongo_cat, zmk_wpm_state_changed);
+ZMK_SUBSCRIPTION(widget_bongo_cat, dd_status_changed);
 
 int zmk_widget_bongo_cat_init(struct zmk_widget_bongo_cat *widget, lv_obj_t *parent) {
     widget->obj = lv_animimg_create(parent);

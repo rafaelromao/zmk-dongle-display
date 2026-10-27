@@ -19,33 +19,21 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/usb.h>
 
 #include "battery_status.h"
+#include <dongle_display/status.h>
 
-#if IS_ENABLED(CONFIG_ZMK_DONGLE_DISPLAY_DONGLE_BATTERY)
-    #define SOURCE_OFFSET 1
-#else
-    #define SOURCE_OFFSET 0
-#endif
-
-#ifndef ZMK_SPLIT_BLE_PERIPHERAL_COUNT
-#  define ZMK_SPLIT_BLE_PERIPHERAL_COUNT 0
-#endif
+#define BATTERY_ROWS MIN(DD_MAX_PERIPHERALS + 1, DT_PROP(DT_CHOSEN(zephyr_display), height) / 10)
 
 #define BUFFER_SIZE LV_CANVAS_BUF_SIZE(5, 8, LV_COLOR_FORMAT_GET_BPP(LV_COLOR_FORMAT_L8), LV_DRAW_BUF_STRIDE_ALIGN)
 
 static sys_slist_t widgets = SYS_SLIST_STATIC_INIT(&widgets);
 
-struct battery_state {
-    uint8_t source;
-    uint8_t level;
-    bool usb_present;
-};
-
 struct battery_object {
     lv_obj_t *symbol;
     lv_obj_t *label;
-} battery_objects[ZMK_SPLIT_BLE_PERIPHERAL_COUNT + SOURCE_OFFSET];
+} battery_objects[BATTERY_ROWS];
     
-static lv_color_t battery_image_buffer[ZMK_SPLIT_BLE_PERIPHERAL_COUNT + SOURCE_OFFSET][BUFFER_SIZE];
+static lv_color_t battery_image_buffer[BATTERY_ROWS][BUFFER_SIZE];
+static uint8_t page;
 
 static void draw_battery(lv_obj_t *canvas, uint8_t level, bool usb_present) {
     lv_canvas_fill_bg(canvas, lv_color_black(), LV_OPA_COVER);
@@ -90,81 +78,80 @@ static void draw_battery(lv_obj_t *canvas, uint8_t level, bool usb_present) {
     lv_canvas_finish_layer(canvas, &layer);
 }
 
-static void set_battery_symbol(lv_obj_t *widget, struct battery_state state) {
-    if (state.source >= ZMK_SPLIT_BLE_PERIPHERAL_COUNT + SOURCE_OFFSET) {
-        return;
+static void battery_status_update_cb(struct dd_status state) {
+    static struct dd_node previous[BATTERY_ROWS];
+    static bool visible[BATTERY_ROWS], was_local[BATTERY_ROWS];
+    uint8_t sources[DD_MAX_PERIPHERALS + 1];
+    unsigned count = 0;
+    /* Keep the original order/positions: optional central battery, then halves
+     * in split-source order. A USB-only central has no battery row. */
+    if (state.nodes[0].flags & DD_NODE_BATTERY) {
+        sources[count++] = 0;
     }
-    LOG_DBG("source: %d, level: %d, usb: %d", state.source, state.level, state.usb_present);
-    lv_obj_t *symbol = battery_objects[state.source].symbol;
-    lv_obj_t *label = battery_objects[state.source].label;
-
-    draw_battery(symbol, state.level, state.usb_present);
-    lv_label_set_text_fmt(label, "%4u%% ", state.level);
-    
-    if (state.level > 0 || state.usb_present) {
+    if (state.local_node == DD_NO_LOCAL_NODE && (state.local.flags & DD_NODE_BATTERY)) {
+        sources[count++] = DD_NO_LOCAL_NODE;
+    } else {
+        for (int node = 1; node <= state.peripheral_count; node++) {
+            sources[count++] = node;
+        }
+    }
+    unsigned pages = (count + BATTERY_ROWS - 1) / BATTERY_ROWS;
+    page %= pages ? pages : 1;
+    for (unsigned row = 0; row < BATTERY_ROWS; row++) {
+        lv_obj_t *symbol = battery_objects[row].symbol;
+        lv_obj_t *label = battery_objects[row].label;
+        unsigned index = page * BATTERY_ROWS + row;
+        if (index >= count) {
+            lv_obj_add_flag(symbol, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
+            visible[row] = false;
+            continue;
+        }
+        uint8_t source = sources[index];
+        struct dd_node node = source == DD_NO_LOCAL_NODE ? state.local : state.nodes[source];
+        bool known = node.flags & DD_NODE_KNOWN;
+        bool connected = node.flags & DD_NODE_CONNECTED;
+        /* The local half still has a valid battery after the split drops. */
+        bool local = source == DD_NO_LOCAL_NODE || source == state.local_node;
+        if (visible[row] && was_local[row] == local &&
+            !memcmp(&previous[row], &node, sizeof(node))) {
+            continue;
+        }
+        previous[row] = node;
+        was_local[row] = local;
+        visible[row] = true;
+        draw_battery(symbol, known ? node.battery : 0, node.flags & DD_NODE_USB);
         lv_obj_clear_flag(symbol, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_move_foreground(symbol);
         lv_obj_clear_flag(label, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_move_foreground(label);
-    } else {
-        lv_obj_add_flag(symbol, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
+        if (!connected && !local) {
+            lv_label_set_text(label, "  --  ");
+        } else if (!known) {
+            lv_label_set_text(label, "   ?  ");
+        } else {
+            lv_label_set_text_fmt(label, "%4u%% ", node.battery);
+        }
     }
 }
 
-void battery_status_update_cb(struct battery_state state) {
-    struct zmk_widget_dongle_battery_status *widget;
-    SYS_SLIST_FOR_EACH_CONTAINER(&widgets, widget, node) { set_battery_symbol(widget->obj, state); }
+static struct dd_status battery_status_get_state(const zmk_event_t *eh) {
+    return dd_status_get();
 }
 
-static struct battery_state peripheral_battery_status_get_state(const zmk_event_t *eh) {
-    const struct zmk_peripheral_battery_state_changed *ev = as_zmk_peripheral_battery_state_changed(eh);
-    return (struct battery_state){
-        .source = ev->source + SOURCE_OFFSET,
-        .level = ev->state_of_charge,
-    };
-}
-
-static struct battery_state central_battery_status_get_state(const zmk_event_t *eh) {
-    const struct zmk_battery_state_changed *ev = as_zmk_battery_state_changed(eh);
-    return (struct battery_state) {
-        .source = 0,
-        .level = (ev != NULL) ? ev->state_of_charge : zmk_battery_state_of_charge(),
-#if IS_ENABLED(CONFIG_USB_DEVICE_STACK)
-        .usb_present = zmk_usb_is_powered(),
-#endif /* IS_ENABLED(CONFIG_USB_DEVICE_STACK) */
-    };
-}
-
-static struct battery_state battery_status_get_state(const zmk_event_t *eh) { 
-    if (as_zmk_peripheral_battery_state_changed(eh) != NULL) {
-        return peripheral_battery_status_get_state(eh);
-    } else {
-        return central_battery_status_get_state(eh);
-    }
-}
-
-ZMK_DISPLAY_WIDGET_LISTENER(widget_dongle_battery_status, struct battery_state,
+ZMK_DISPLAY_WIDGET_LISTENER(widget_dongle_battery_status, struct dd_status,
                             battery_status_update_cb, battery_status_get_state)
+ZMK_SUBSCRIPTION(widget_dongle_battery_status, dd_status_changed);
 
-ZMK_SUBSCRIPTION(widget_dongle_battery_status, zmk_peripheral_battery_state_changed);
-
-#if IS_ENABLED(CONFIG_ZMK_DONGLE_DISPLAY_DONGLE_BATTERY)
-#if !IS_ENABLED(CONFIG_ZMK_SPLIT) || IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-
-ZMK_SUBSCRIPTION(widget_dongle_battery_status, zmk_battery_state_changed);
-#if IS_ENABLED(CONFIG_USB_DEVICE_STACK)
-ZMK_SUBSCRIPTION(widget_dongle_battery_status, zmk_usb_conn_state_changed);
-#endif /* IS_ENABLED(CONFIG_USB_DEVICE_STACK) */
-#endif /* !IS_ENABLED(CONFIG_ZMK_SPLIT) || IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) */
-#endif /* IS_ENABLED(CONFIG_ZMK_DONGLE_DISPLAY_DONGLE_BATTERY) */
+static void change_page(lv_timer_t *timer) {
+    page++;
+    battery_status_update_cb(dd_status_get());
+}
 
 int zmk_widget_dongle_battery_status_init(struct zmk_widget_dongle_battery_status *widget, lv_obj_t *parent) {
     widget->obj = lv_obj_create(parent);
 
     lv_obj_set_size(widget->obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
 
-    for (int i = 0; i < ZMK_SPLIT_BLE_PERIPHERAL_COUNT + SOURCE_OFFSET; i++) {
+    for (int i = 0; i < BATTERY_ROWS; i++) {
         lv_obj_t *image_canvas = lv_canvas_create(widget->obj);
         lv_obj_t *battery_label = lv_label_create(widget->obj);
 
@@ -185,6 +172,7 @@ int zmk_widget_dongle_battery_status_init(struct zmk_widget_dongle_battery_statu
     sys_slist_append(&widgets, &widget->node);
 
     widget_dongle_battery_status_init();
+    lv_timer_create(change_page, 5000, NULL);
 
     return 0;
 }

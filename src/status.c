@@ -17,6 +17,14 @@
 #else
 #define DD_PERIPHERAL 0
 #include <zmk/endpoints.h>
+#include <zmk/keymap.h>
+#include <zmk/hid.h>
+#include <zmk/wpm.h>
+#include <zmk/hid_indicators.h>
+#include <zmk/events/keycode_state_changed.h>
+#include <zmk/events/layer_state_changed.h>
+#include <zmk/events/wpm_state_changed.h>
+#include <zmk/events/hid_indicators_changed.h>
 #if IS_ENABLED(CONFIG_ZMK_SPLIT)
 #include <zmk/split/central.h>
 #include <zmk/split/transport/central.h>
@@ -37,6 +45,8 @@ static struct k_spinlock lock;
 static struct dd_status status = {.local_node = DD_NO_LOCAL_NODE};
 #if DD_PERIPHERAL
 static int64_t node_received[DD_MAX_PERIPHERALS + 1];
+static int64_t widgets_received;
+static struct dd_widget_rx widget_rx;
 #endif
 #if !DD_PERIPHERAL
 static bool battery_seen[DD_MAX_PERIPHERALS];
@@ -61,10 +71,15 @@ static int receive_status(struct zmk_behavior_binding *binding,
                           struct zmk_behavior_binding_event event) {
     k_spinlock_key_t key = k_spin_lock(&lock);
     struct dd_status previous = status;
-    bool valid = dd_status_decode(&status, binding->param1, binding->param2);
+    bool widget_packet = (binding->param1 >> 24) == DD_WIDGET_PROTOCOL_VERSION;
+    bool valid = widget_packet
+        ? dd_widgets_decode(&status.widgets, &widget_rx, binding->param1, binding->param2)
+        : dd_status_decode(&status, binding->param1, binding->param2);
     bool changed = memcmp(&previous, &status, sizeof(status)) != 0;
-    if (valid) {
+    if (valid && !widget_packet) {
         node_received[(uint8_t)binding->param1] = k_uptime_get();
+    } else if (valid && widget_rx.received == 0) {
+        widgets_received = k_uptime_get();
     }
     k_spin_unlock(&lock, key);
     if (!valid) {
@@ -102,8 +117,27 @@ static struct dd_node local_battery(bool central) {
 }
 
 #if !DD_PERIPHERAL
+static struct dd_widgets collect_widgets(void) {
+    struct dd_widgets next = {
+        .layer = zmk_keymap_highest_layer_active(),
+        .modifiers = zmk_hid_get_explicit_mods(),
+    };
+    const char *name = zmk_keymap_layer_name(next.layer);
+    if (name) {
+        strncpy(next.layer_name, name, DD_LAYER_NAME_LENGTH);
+    }
+#if IS_ENABLED(CONFIG_ZMK_WPM)
+    next.wpm = CLAMP(zmk_wpm_get_state(), 0, UINT8_MAX);
+#endif
+#if IS_ENABLED(CONFIG_ZMK_HID_INDICATORS)
+    next.indicators = zmk_hid_indicators_get_current_profile();
+#endif
+    return next;
+}
+
 static struct dd_status collect_status(void) {
     struct dd_status next = {.live = true, .local_node = 0};
+    next.widgets = collect_widgets();
     next.nodes[0] = local_battery(true);
     next.local = next.nodes[0];
     struct zmk_endpoint_instance selected = zmk_endpoint_get_selected();
@@ -161,10 +195,22 @@ static struct dd_status collect_status(void) {
 }
 
 #if IS_ENABLED(CONFIG_ZMK_DONGLE_DISPLAY_STATUS_SYNC)
-static uint8_t relay_source, relay_node;
-static bool relay_active, relay_again;
+static uint8_t relay_source, relay_packet, relay_sequence;
+static bool relay_active, relay_status_pending, relay_widgets_pending;
+static bool relay_status_frame, relay_widget_frame;
+static struct dd_status relay_snapshot;
 static void relay_step(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(relay_work, relay_step);
+
+static void relay_begin(void) {
+    relay_snapshot = dd_status_get();
+    relay_status_frame = relay_status_pending;
+    relay_widget_frame = relay_widgets_pending;
+    relay_status_pending = relay_widgets_pending = false;
+    relay_source = relay_packet = 0;
+    relay_sequence++;
+    relay_active = true;
+}
 
 static void relay_step(struct k_work *work) {
     struct dd_status next = dd_status_get();
@@ -172,14 +218,12 @@ static void relay_step(struct k_work *work) {
            (!(CONFIG_ZMK_DONGLE_DISPLAY_STATUS_RECEIVERS & BIT(relay_source)) ||
             !(next.nodes[relay_source + 1].flags & DD_NODE_CONNECTED))) {
         relay_source++;
-        relay_node = 0;
+        relay_packet = 0;
     }
     if (relay_source >= next.peripheral_count) {
         relay_active = false;
-        if (relay_again) {
-            relay_again = false;
-            relay_source = relay_node = 0;
-            relay_active = true;
+        if (relay_status_pending || relay_widgets_pending) {
+            relay_begin();
             k_work_reschedule(&relay_work, K_MSEC(20));
         }
         return;
@@ -187,31 +231,70 @@ static void relay_step(struct k_work *work) {
     struct zmk_behavior_binding binding = {
         .behavior_dev = DEVICE_DT_NAME(DT_NODELABEL(dd_status)),
     };
-    dd_status_encode(&next, relay_node, relay_source + 1, &binding.param1, &binding.param2);
+    uint8_t status_packets = relay_status_frame ? relay_snapshot.peripheral_count + 1 : 0;
+    if (relay_packet < status_packets) {
+        dd_status_encode(&relay_snapshot, relay_packet, relay_source + 1,
+                         &binding.param1, &binding.param2);
+    } else {
+        dd_widgets_encode(&relay_snapshot.widgets, relay_sequence, relay_packet - status_packets,
+                          &binding.param1, &binding.param2);
+    }
     struct zmk_behavior_binding_event event = {.timestamp = k_uptime_get()};
     int err = zmk_split_central_invoke_behavior(relay_source, &binding, event, true);
     if (err < 0) {
         k_work_reschedule(&relay_work, K_SECONDS(1));
         return;
     }
-    if (++relay_node > next.peripheral_count) {
+    if (++relay_packet >= status_packets + (relay_widget_frame ? DD_WIDGET_PACKETS : 0)) {
         relay_source++;
-        relay_node = 0;
+        relay_packet = 0;
     }
     /* Do not flood ZMK's small behavior queue or evict normal key behaviors.
      * A packet is 20 bytes, fitting the default BLE ATT payload without MTU negotiation. */
     k_work_reschedule(&relay_work, K_MSEC(20));
 }
 
-static void relay(void) {
+static void relay(bool full_status) {
+    relay_status_pending |= full_status;
+    relay_widgets_pending = true;
     if (relay_active) {
-        relay_again = true;
         return;
     }
-    relay_source = relay_node = 0;
-    relay_active = true;
+    relay_begin();
     k_work_reschedule(&relay_work, K_NO_WAIT);
 }
+#endif
+
+/* Collect after key processing has updated HID/layer state. Coalesce bursts,
+ * but do not postpone indefinitely under continuous typing. All relay state is
+ * owned by the system work queue, never the BLE or event-dispatch threads. */
+static void widget_work_cb(struct k_work *work) {
+    struct dd_widgets next = collect_widgets();
+    k_spinlock_key_t key = k_spin_lock(&lock);
+    bool changed = memcmp(&status.widgets, &next, sizeof(next)) != 0;
+    status.widgets = next;
+    k_spin_unlock(&lock, key);
+    if (changed) {
+        notify();
+#if IS_ENABLED(CONFIG_ZMK_DONGLE_DISPLAY_STATUS_SYNC)
+        relay(false);
+#endif
+    }
+}
+static K_WORK_DELAYABLE_DEFINE(widget_work, widget_work_cb);
+
+static int widget_event(const zmk_event_t *eh) {
+    k_work_schedule(&widget_work, K_MSEC(20));
+    return ZMK_EV_EVENT_BUBBLE;
+}
+ZMK_LISTENER(dd_widgets, widget_event);
+ZMK_SUBSCRIPTION(dd_widgets, zmk_keycode_state_changed);
+ZMK_SUBSCRIPTION(dd_widgets, zmk_layer_state_changed);
+#if IS_ENABLED(CONFIG_ZMK_WPM)
+ZMK_SUBSCRIPTION(dd_widgets, zmk_wpm_state_changed);
+#endif
+#if IS_ENABLED(CONFIG_ZMK_HID_INDICATORS)
+ZMK_SUBSCRIPTION(dd_widgets, zmk_hid_indicators_changed);
 #endif
 #endif
 
@@ -232,6 +315,11 @@ static void poll(struct k_work *work) {
     k_spinlock_key_t key = k_spin_lock(&lock);
     if (!connected || now - node_received[0] > expiry) {
         dd_status_disconnect(&status);
+        memset(&widget_rx, 0, sizeof(widget_rx));
+    }
+    if (now - widgets_received > expiry) {
+        memset(&status.widgets, 0, sizeof(status.widgets));
+        memset(&widget_rx, 0, sizeof(widget_rx));
     }
     for (int node = 1; node <= status.peripheral_count; node++) {
         if (now - node_received[node] > expiry) {
@@ -259,7 +347,7 @@ static void poll(struct k_work *work) {
     int64_t now = k_uptime_get();
     if (changed || now - last_sent >=
                        CONFIG_ZMK_DONGLE_DISPLAY_STATUS_REFRESH_SECONDS * MSEC_PER_SEC) {
-        relay();
+        relay(true);
         last_sent = now;
     }
 #endif

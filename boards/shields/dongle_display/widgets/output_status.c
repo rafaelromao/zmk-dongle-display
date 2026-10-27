@@ -15,6 +15,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/events/usb_conn_state_changed.h>
 #include <zmk/usb.h>
 #include <zmk/endpoints.h>
+#include <dongle_display/status.h>
 
 #include "output_status.h"
 #if IS_ENABLED(CONFIG_ZMK_BLE)
@@ -69,22 +70,19 @@ struct output_status_state {
 };
 
 static struct output_status_state get_state(const zmk_event_t *_eh) {
-    struct output_status_state st;
-
-    st.selected_endpoint = zmk_endpoint_get_selected();
-    st.preferred_transport = zmk_endpoint_get_preferred_transport();
-
-#if IS_ENABLED(CONFIG_ZMK_BLE)
-    st.active_profile_index     = zmk_ble_active_profile_index();
-    st.active_profile_connected = zmk_ble_active_profile_is_connected();
-    st.active_profile_bonded    = !zmk_ble_active_profile_is_open();
-#else
-    st.active_profile_index     = 0;
-    st.active_profile_connected = false;
-    st.active_profile_bonded    = false;
-#endif
-
-    st.usb_is_hid_ready = zmk_usb_is_hid_ready();
+    struct dd_status state = dd_status_get();
+    struct output_status_state st = {0};
+    st.preferred_transport = state.host_flags & DD_HOST_SELECTED_USB ? ZMK_TRANSPORT_USB :
+                             state.host_flags & DD_HOST_SELECTED_BLE ? ZMK_TRANSPORT_BLE :
+                             ZMK_TRANSPORT_NONE;
+    bool connected = st.preferred_transport == ZMK_TRANSPORT_USB
+                         ? state.host_flags & DD_HOST_USB_READY
+                         : state.host_flags & DD_HOST_BLE_CONNECTED;
+    st.selected_endpoint.transport = connected ? st.preferred_transport : ZMK_TRANSPORT_NONE;
+    st.active_profile_index = state.profile;
+    st.active_profile_connected = state.host_flags & DD_HOST_BLE_CONNECTED;
+    st.active_profile_bonded = state.host_flags & DD_HOST_BLE_BONDED;
+    st.usb_is_hid_ready = state.host_flags & DD_HOST_USB_READY;
     return st;
 }
 
@@ -189,11 +187,7 @@ static void output_status_update_cb(struct output_status_state state) {
 
 ZMK_DISPLAY_WIDGET_LISTENER(widget_output_status, struct output_status_state,
                             output_status_update_cb, get_state)
-ZMK_SUBSCRIPTION(widget_output_status, zmk_endpoint_changed);
-#if IS_ENABLED(CONFIG_ZMK_BLE)
-ZMK_SUBSCRIPTION(widget_output_status, zmk_ble_active_profile_changed);
-#endif
-ZMK_SUBSCRIPTION(widget_output_status, zmk_usb_conn_state_changed);
+ZMK_SUBSCRIPTION(widget_output_status, dd_status_changed);
 
 int zmk_widget_output_status_init(struct zmk_widget_output_status *widget, lv_obj_t *parent) {
     widget->obj = lv_obj_create(parent);

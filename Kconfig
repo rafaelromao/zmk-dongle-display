@@ -8,9 +8,10 @@ if ZMK_DONGLE_DISPLAY_STATUS
 
 config ZMK_DONGLE_DISPLAY_STATUS_SCREEN
     bool "Compact battery and connectivity screen (128x32 or 128x64)"
-    default y if SHIELD_DONGLE_DISPLAY
+    default n
     help
-        Disable to use the original central-only animated screen instead.
+        Optional text-only diagnostic screen. The original widget screen is
+        the default on both central and peripheral displays.
 
 config ZMK_DONGLE_DISPLAY_MAX_PERIPHERALS
     int "Maximum number of peripherals displayed/relayed"
@@ -25,6 +26,8 @@ config ZMK_DONGLE_DISPLAY_STATUS_SYNC
     depends on ZMK_SPLIT_BLE
     default y if SHIELD_DONGLE_DISPLAY_RELAY
     default y if SHIELD_DONGLE_DISPLAY && !ZMK_SPLIT_ROLE_CENTRAL
+    select ZMK_WPM if ZMK_SPLIT_ROLE_CENTRAL
+    imply ZMK_HID_INDICATORS if ZMK_SPLIT_ROLE_CENTRAL
     help
         Enable on the central and every peripheral carrying a status screen.
         The relay shield enables this without a display, LVGL, or battery.

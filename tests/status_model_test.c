@@ -136,11 +136,87 @@ static void local_sampling_wins_over_relayed_copy(void) {
     assert(receiver.nodes[1].battery == 99);
 }
 
+static void widget_frames(void) {
+    struct dd_widgets sent = {
+        .layer = 31, .modifiers = 0xff, .indicators = 7, .wpm = 255,
+        .layer_name = "ABCDEFGHIJKL",
+    };
+    struct dd_widgets got = {0};
+    struct dd_widget_rx rx = {0};
+    uint32_t p1, p2;
+    dd_widgets_encode(&sent, 6, 0, &p1, &p2);
+    assert(p1 == 0x0200061fu && p2 == 0x0c07ffffu);
+    dd_widgets_encode(&sent, 6, 1, &p1, &p2);
+    assert(p1 == 0x02010600u && p2 == 0x44434241u);
+    for (unsigned sequence = 0; sequence < 257; sequence++) {
+        for (int packet = 0; packet < DD_WIDGET_PACKETS; packet++) {
+            dd_widgets_encode(&sent, sequence, packet, &p1, &p2);
+            assert(dd_widgets_decode(&got, &rx, p1, p2));
+        }
+        assert(!memcmp(&got, &sent, sizeof(got)));
+    }
+    /* An incomplete/new frame cannot tear the currently visible label/state. */
+    struct dd_widgets previous = got;
+    sent = (struct dd_widgets){.layer = 1, .layer_name = "Fn"};
+    dd_widgets_encode(&sent, 9, 0, &p1, &p2);
+    assert(dd_widgets_decode(&got, &rx, p1, p2));
+    dd_widgets_encode(&sent, 8, 1, &p1, &p2);
+    assert(!dd_widgets_decode(&got, &rx, p1, p2));
+    assert(!memcmp(&got, &previous, sizeof(got)));
+    /* Missing chunk, duplicates, and reordering inside the same frame. */
+    int order[] = {3, 1, 1, 2};
+    for (unsigned i = 0; i < sizeof(order) / sizeof(order[0]); i++) {
+        dd_widgets_encode(&sent, 9, order[i], &p1, &p2);
+        assert(dd_widgets_decode(&got, &rx, p1, p2));
+        if (i < 3) {
+            assert(!memcmp(&got, &previous, sizeof(got)));
+        }
+    }
+    assert(!memcmp(&got, &sent, sizeof(got)));
+    /* No layer label: use the numeric layer, and clear all typing/lock state. */
+    sent = (struct dd_widgets){.layer = 2};
+    for (int packet = 0; packet < DD_WIDGET_PACKETS; packet++) {
+        dd_widgets_encode(&sent, 10, packet, &p1, &p2);
+        assert(dd_widgets_decode(&got, &rx, p1, p2));
+    }
+    assert(!memcmp(&got, &sent, sizeof(got)));
+    dd_widgets_encode(&sent, 11, 0, &p1, &p2);
+    struct dd_widget_rx before = rx;
+    assert(!dd_widgets_decode(&got, &rx, p1, p2 | (13u << 24)));
+    assert(!memcmp(&rx, &before, sizeof(rx)));
+    assert(!dd_widgets_decode(&got, &rx, p1 ^ (3u << 24), p2));
+    assert(!dd_widgets_decode(&got, &rx, p1 | (4u << 16), p2));
+    /* A permanently dropped chunk is recovered by the next complete heartbeat.
+     * A late tail from the previous frame cannot overwrite that new snapshot. */
+    dd_widgets_encode(&sent, 11, 0, &p1, &p2);
+    assert(dd_widgets_decode(&got, &rx, p1, p2));
+    dd_widgets_encode(&sent, 11, 1, &p1, &p2);
+    assert(dd_widgets_decode(&got, &rx, p1, p2));
+    previous = got;
+    sent = (struct dd_widgets){.layer = 3, .modifiers = 2, .wpm = 42, .layer_name = "INSERT"};
+    dd_widgets_encode(&sent, 12, 0, &p1, &p2);
+    assert(dd_widgets_decode(&got, &rx, p1, p2));
+    dd_widgets_encode(&sent, 11, 3, &p1, &p2);
+    assert(!dd_widgets_decode(&got, &rx, p1, p2));
+    for (int packet = 1; packet < DD_WIDGET_PACKETS; packet++) {
+        dd_widgets_encode(&sent, 12, packet, &p1, &p2);
+        assert(dd_widgets_decode(&got, &rx, p1, p2));
+        if (packet < DD_WIDGET_PACKETS - 1) {
+            assert(!memcmp(&got, &previous, sizeof(got)));
+        }
+    }
+    assert(!memcmp(&got, &sent, sizeof(got)));
+    struct dd_status status = {.widgets = got};
+    dd_status_disconnect(&status);
+    assert(!memcmp(&status.widgets, &(struct dd_widgets){0}, sizeof(got)));
+}
+
 int main(void) {
     round_trip();
     malformed_packets_do_not_mutate_state();
     text_and_disconnect();
     reconnect_and_all_sources();
     local_sampling_wins_over_relayed_copy();
-    puts("PASS status protocol, all sources, reconnect, invalid data, battery and host text");
+    widget_frames();
+    puts("PASS status and widget protocols, all sources, reconnect, invalid/partial frames, battery and host text");
 }

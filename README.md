@@ -5,9 +5,39 @@ This fork provides central **and peripheral** status screens for 128x32 and
 status and the battery/connection status of every half, even when the central
 is a USB-powered dongle with no display or battery.
 
-## Compact status screen
+## Original widget screen (default)
 
-The default screen uses eight-pixel rows, without animation or WPM collection:
+The original screen, icon assets, widget positions and animations are preserved
+on both central and peripheral OLEDs. USB/Bluetooth output indicators, battery
+icons and percentages, Bongo Cat, modifiers, lock indicators, layer names and WPM
+use the same widgets as before. A peripheral reads the central's relayed state,
+not an incomplete local copy of its keymap or host connection.
+
+All existing `CONFIG_ZMK_DONGLE_DISPLAY_*` widget options still apply. Nothing is
+automatically disabled based on resolution. For a 128x32 screen, you can keep
+the usual smaller selection, for example:
+
+```ini
+CONFIG_ZMK_DONGLE_DISPLAY_BONGO_CAT=n
+CONFIG_ZMK_DONGLE_DISPLAY_MODIFIERS=n
+```
+
+Both widgets remain available with `=y`, including on a peripheral. Enable WPM
+with `CONFIG_ZMK_DONGLE_DISPLAY_WPM=y`. Lock indicators accompany the modifiers
+widget, and the Mac/Windows modifier icon selection is unchanged.
+
+Battery rows retain their original top-right position and pairing order: central
+first only if it has an enabled battery, then all peripherals. A battery-less
+central has no invented percentage; its connectivity appears in the host output
+widget. `0%` remains a valid reading, `?` means unknown, and `--` means a remote
+half is disconnected/stale. Local battery sampling remains authoritative even
+after the split disconnects. More battery rows than fit are paginated every five
+seconds without changing the rest of the screen.
+
+## Optional compact diagnostic screen
+
+Set `CONFIG_ZMK_DONGLE_DISPLAY_STATUS_SCREEN=y` to use a text-only diagnostic
+screen instead of the original widgets. It uses eight-pixel rows:
 
 ```text
 >USB+  BT1-
@@ -29,8 +59,8 @@ Both resolutions show the central and two peripherals at once. More peripherals
 are paginated every five seconds; set `CONFIG_ZMK_DONGLE_DISPLAY_MAX_PERIPHERALS`
 to the same value (up to 14) on central and display halves. The screen reads its
 dimensions from `zephyr,display`; no resolution-specific firmware edits are
-needed beyond the existing display devicetree. Existing central-only animated
-widgets remain available with `CONFIG_ZMK_DONGLE_DISPLAY_STATUS_SCREEN=n`.
+needed beyond the existing display devicetree. Leave
+`CONFIG_ZMK_DONGLE_DISPLAY_STATUS_SCREEN=n` (the default) for the original widgets.
 
 ## Screen on a peripheral, headless central
 
@@ -84,7 +114,23 @@ CONFIG_ZMK_DONGLE_DISPLAY_STATUS_SYNC=y
 CONFIG_LV_Z_VDB_SIZE=32
 ```
 
-Changes are coalesced within one second. A complete heartbeat every 30 seconds
+Host/battery changes are coalesced within one second. Typing and layer changes
+are collected after a 20 ms coalescing window and queued separately, so modifier
+or WPM changes do not retransmit every battery. The central relays the highest
+layer and its name (the same 12-character label limit as the original widget),
+explicit modifiers, host lock indicators and WPM. Bongo Cat animates locally
+from WPM, not from a radio packet for every animation frame. The relay enables
+WPM and, by default, host lock-indicator collection on the headless central,
+without enabling a display or local battery sampling there.
+
+Widget snapshots are four paced 20-byte behavior packets. They carry a sequence
+number and are applied atomically only after the full snapshot arrives; dropped
+or mixed chunks do not show half-updated layer names. Intermediate snapshots
+are coalesced while a transmission is in progress. This adds radio traffic while
+typing compared to battery-only relay; battery-life improvement is not measured.
+Flash matching module versions on the central and display half.
+
+A complete heartbeat every 30 seconds
 recovers from dropped writes and split discovery not having finished at initial
 connection. `CONFIG_ZMK_DONGLE_DISPLAY_STATUS_REFRESH_SECONDS` changes this
 interval (use the same setting on both devices). There is no periodic radio
@@ -99,7 +145,9 @@ peripheral deep sleep are preserved; status updates do not count as key activity
 Run `bash tests/run.sh` with a host C compiler. It checks the actual packet
 encoder/decoder and status formatting with ASan/UBSan, including all supported
 source IDs, zero/unknown batteries, battery-less central, malformed packets and
-reconnection. Firmware/physical BLE and OLED tests are separate.
+reconnection. Widget tests cover modifier/WPM/lock state, layer-label chunks,
+partial/dropped/mixed frames, sequence rollover and disconnect reset.
+Firmware/physical BLE and OLED tests are separate.
 
 ## Usage
 
@@ -141,8 +189,8 @@ For setup examples, refer to the shields in my [`zmk-config`](https://github.com
 
 ## Widgets
 
-The following widgets describe the optional legacy screen
-(`CONFIG_ZMK_DONGLE_DISPLAY_STATUS_SCREEN=n`), supported on centrals only:
+The following are the default screen's original widgets, supported on central
+and peripheral displays (`CONFIG_ZMK_DONGLE_DISPLAY_STATUS_SCREEN=n`):
 - active hid indicators (CLCK, NLCK, SLCK)
 - active modifiers
 - bongo cat
@@ -203,8 +251,8 @@ CONFIG_ZMK_DONGLE_DISPLAY_WPM_DISABLED_LAYERS="layers" # comma separated
 
 ## Smaller OLEDs, with 128x32 pixels
 
-The compact status screen already fits 128x32 without hiding status information.
-For the optional legacy screen, exclude widgets that do not fit:
+All widgets remain available on 128x32. To use the original screen's smaller
+configuration, exclude the widgets you do not want:
 
 ```ini
 CONFIG_ZMK_DONGLE_DISPLAY_BONGO_CAT=n

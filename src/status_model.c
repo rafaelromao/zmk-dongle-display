@@ -55,7 +55,62 @@ void dd_status_disconnect(struct dd_status *status) {
         status->nodes[status->local_node] = local;
     }
     status->host_flags = 0;
+    memset(&status->widgets, 0, sizeof(status->widgets));
     status->live = false;
+}
+
+void dd_widgets_encode(const struct dd_widgets *widgets, uint8_t sequence, uint8_t packet,
+                       uint32_t *param1, uint32_t *param2) {
+    *param1 = (DD_WIDGET_PROTOCOL_VERSION << 24) | ((uint32_t)packet << 16) |
+              ((uint32_t)sequence << 8);
+    *param2 = 0;
+    if (packet == 0) {
+        uint8_t length = 0;
+        while (length < DD_LAYER_NAME_LENGTH && widgets->layer_name[length]) {
+            length++;
+        }
+        *param1 |= widgets->layer;
+        *param2 = widgets->modifiers | ((uint32_t)widgets->wpm << 8) |
+                  ((uint32_t)widgets->indicators << 16) | ((uint32_t)length << 24);
+    } else if (packet < DD_WIDGET_PACKETS) {
+        for (int i = 0; i < 4; i++) {
+            *param2 |= (uint32_t)(uint8_t)widgets->layer_name[(packet - 1) * 4 + i] << (i * 8);
+        }
+    }
+}
+
+bool dd_widgets_decode(struct dd_widgets *widgets, struct dd_widget_rx *rx,
+                       uint32_t param1, uint32_t param2) {
+    uint8_t packet = param1 >> 16;
+    uint8_t sequence = param1 >> 8;
+    if ((param1 >> 24) != DD_WIDGET_PROTOCOL_VERSION || packet >= DD_WIDGET_PACKETS) {
+        return false;
+    }
+    if (packet == 0) {
+        uint8_t length = param2 >> 24;
+        if (length > DD_LAYER_NAME_LENGTH) {
+            return false;
+        }
+        *rx = (struct dd_widget_rx){
+            .pending = {.layer = param1, .modifiers = param2, .wpm = param2 >> 8,
+                        .indicators = param2 >> 16},
+            .sequence = sequence, .received = 1, .name_length = length,
+        };
+    } else {
+        if (!rx->received || sequence != rx->sequence || (param1 & 0xff)) {
+            return false;
+        }
+        for (int i = 0; i < 4; i++) {
+            rx->pending.layer_name[(packet - 1) * 4 + i] = param2 >> (i * 8);
+        }
+        rx->received |= 1u << packet;
+    }
+    if (rx->received == (1u << DD_WIDGET_PACKETS) - 1) {
+        rx->pending.layer_name[rx->name_length] = '\0';
+        *widgets = rx->pending;
+        rx->received = 0;
+    }
+    return true;
 }
 
 void dd_status_format_host(const struct dd_status *status, char *text, size_t size) {

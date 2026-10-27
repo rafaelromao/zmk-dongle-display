@@ -15,6 +15,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/hid.h>
 #include <dt-bindings/zmk/modifiers.h>
+#include <dongle_display/status.h>
 
 #include "modifiers.h"
 
@@ -126,14 +127,14 @@ void modifiers_update_cb(struct modifiers_state state) {
 
 static struct modifiers_state modifiers_get_state(const zmk_event_t *eh) {
     return (struct modifiers_state) {
-        .modifiers = zmk_hid_get_explicit_mods()
+        .modifiers = dd_status_get().widgets.modifiers
     };
 }
 
 ZMK_DISPLAY_WIDGET_LISTENER(widget_modifiers, struct modifiers_state,
                             modifiers_update_cb, modifiers_get_state)
 
-ZMK_SUBSCRIPTION(widget_modifiers, zmk_keycode_state_changed);
+ZMK_SUBSCRIPTION(widget_modifiers, dd_status_changed);
 
 int zmk_widget_modifiers_init(struct zmk_widget_modifiers *widget, lv_obj_t *parent) {
     widget->obj = lv_obj_create(parent);
